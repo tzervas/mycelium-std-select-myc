@@ -1,0 +1,135 @@
+// nodule: std.select
+// `std.select` — Ring 1 / Tier A capability surface (M-519).
+//
+// The **ergonomic library surface** over [`mycelium_select`]: a total, non-learned,
+// content-addressed selection-policy DSL with a **mandatory EXPLAIN record** on every
+// selection.
+//
+// # Contract (RFC-0016 §4.1, C1–C6)
+//
+// - **C1 never-silent (G2):** every fallible op returns an explicit `Result`; an empty
+//   candidate set, a non-total policy, an override outside the candidate set, and a wrong-kind
+//   candidate at a site adapter are all explicit errors — never a silent default or clamp.
+// - **C2 honest per-op tag (VR-5):** all ops are `Exact` — the policy is a total predicate
+//   over *exact* metadata; nothing is probabilistic, learned, or estimated. The `Exact` tag
+//   covers the *selection decision*, not downstream op accuracy.
+// - **C3 no black boxes / EXPLAIN (SC-3/G11):** this is the module's reason to exist.
+//   [`select`] and [`select_with_override`] **always** emit a valid [`Explanation`]; there is
+//   no code path that returns a choice without one. [`explain`] *is* the artifact.
+// - **C4 content-addressed, value-semantic (ADR-003):** a [`SelectionPolicy`] is an immutable
+//   value; its identity is its [`PolicyRef`] content hash. [`select`] and [`explain`] are pure
+//   functions of their inputs.
+// - **C5 above the kernel (KC-3):** this crate re-exports and wraps `mycelium-select`; it adds
+//   no trusted code and uses no `unsafe`/FFI.
+// - **C6 declared, bounded effects (RFC-0014):** all ops are pure — no IO, time, randomness,
+//   or unbounded allocation. The policy language is not Turing-complete; selection terminates.
+//
+// # Guarantee matrix (RFC-0016 §4.5)
+//
+// Encoded as data in [`GUARANTEE_MATRIX`] and asserted in the test suite.
+//
+// | Op | Tag | Fallibility | Effects | EXPLAIN-able |
+// |---|---|---|---|---|
+// | [`build`] | `Exact` | `Err(PolicyError)` — non-total / malformed table | none | n/a |
+// | [`policy_ref`] | `Exact` | total | none | n/a |
+// | [`select`] | `Exact` | `Err(SelectError)` — empty set, wrong kind | none | **yes** |
+// | [`explain`] | `Exact` | total over valid policy | none | **yes** |
+// | [`select_with_override`] | `Exact` | `Err(SelectError)` — out-of-range forced index | none | **yes** |
+//
+// # Design notes
+//
+// - Signatures follow the spec sketch in `docs/spec/stdlib/select.md §3`; exact field names of
+//   [`Explanation`] are owned by the landed `mycelium-select` crate (M-221) and re-exported
+//   here without fabrication (resolves spec open question Q1).
+// - Cost units are storage **bits** as declared (M-220; RFC-0005 §2) — no "arbitrary internal
+//   units". Q2 (multi-unit cost) is out of scope for v0.
+// - EXPLAIN ergonomics: every call site returns `(choice, explanation)` — the mandatory-EXPLAIN
+//   posture (C3 / SC-3). The §8-Q3 implicit-but-inspectable direction (M-540) is a follow-on
+//   per-ring design pass; v0 makes the record explicit at every call.
+// - Policy composition (Q4) is deferred to v1 — no first-class composition op here.
+//
+// # FLAG: Q3 ergonomics-vs-contract
+//
+// Per spec §7-Q3 / RFC-0016 §8-Q3: whether the default return is `(choice, explanation)` or
+// `choice` with `explanation` on demand is deferred to the M-540 per-ring design pass. This
+// v0 surface always returns `(choice, explanation)` — the mandatory-EXPLAIN posture (C3). A
+// future M-540 pass may add an ergonomic `select_choice`-only wrapper, but that cannot suppress
+// the EXPLAIN record's *existence* — only its return position. Tracked: spec §7-Q3.
+//
+// ## Ambient Representation (RFC-0012 §8-Q3)
+//
+// This crate's public API participates in the RFC-0012 ambient-representation contract:
+// the representation choice (binary/ternary/dense/VSA) is implicit at the call site but
+// always reified, queryable, and EXPLAIN-able — never a black box (C3/SC-3).
+// [Declared per RFC-0012; direction accepted in DN-07 §8-Q3; per-ring pass scheduled as M-540.]
+//
+// **For this crate (Ring 1, Tier A):** Selection records the chosen packing and representation
+// in the mandatory [`Explanation`] artifact (the `meta.physical` of the selected candidate,
+// EXPLAIN-able via `explain`); there is no code path that returns a layout decision without
+// an accompanying record. The representation choice is never a silent internal layout decision.
+//
+// # Stability (DN-66 freeze, 2026-07-01)
+//
+// This crate's public API, as documented in `docs/spec/stdlib/select.md` (spec status:
+// Accepted (2026-06-20)) and asserted by its guarantee-matrix table, is the **frozen baseline** per
+// [DN-66](../../../docs/notes/DN-66-Stdlib-Stable-API-Freeze-And-Rust-Crate-Retirement-Status.md).
+// A future breaking change here needs a spec amendment + changelog entry, not a silent edit (G2).
+//
+// **Unfrozen for the gap-closure window (ADR-045, Accepted 2026-07-10):** this DN-66 freeze is
+// lifted per [ADR-045](../../../docs/adr/ADR-045-Kernel-And-Lexicon-Unfreeze-For-Early-Gap-Closure.md)
+// for a bounded window; a breaking change here still needs a spec amendment + changelog entry
+// (G2), not a silent edit — the window closes per the ADR-045 §2.4 re-freeze conditions, bound by
+// the DN-99 residual worklist.
+// It remains the RFC-0031 D6 differential-oracle reference; no `.myc` port of this module exists yet, so the D6 retirement trigger has not fired and no item here is `#[deprecated]`.
+// @summary: best-effort transpilation via mycelium-transpile (M-873). Declared,
+// unvalidated — no Mycelium parser/typechecker confirms this output; see the
+// accompanying .gap.json for every construct this pass could not express.
+nodule std.select;
+
+// One row of the guarantee matrix (RFC-0016 §4.5; spec §4).
+//
+// The matrix is **data** — asserted in tests — not prose only. Every exported selection op has
+// a row; the `tag` column is the honest per-op guarantee (VR-5); `explain_able` is the
+// module's honesty crux (C3).
+type GuaranteeRow = GuaranteeRow(Bytes, GuaranteeTag, Bool, Bytes, ExplainAble);
+
+impl Show[GuaranteeRow] for GuaranteeRow {
+  fn render(x: GuaranteeRow) => Bytes =
+    match x { GuaranteeRow(p0, p1, p2, p3, p4) => bytes_concat(bytes_concat(bytes_concat(bytes_concat(bytes_concat(bytes_concat(bytes_concat(bytes_concat(bytes_concat(bytes_concat("GuaranteeRow(", render(p0)), ", "), render(p1)), ", "), render(p2)), ", "), render(p3)), ", "), render(p4)), ")") };
+};
+
+fn eq_GuaranteeRow(a: GuaranteeRow, b: GuaranteeRow) => Binary{1} =
+    match a { GuaranteeRow(p0, p1, p2, p3, p4) => match b { GuaranteeRow(q0, q1, q2, q3, q4) => and(and(and(and(bytes_eq(p0, q0), eq_GuaranteeTag(p1, q1)), match p2 { True => match q2 { True => 0b1, False => 0b0 }, False => match q2 { True => 0b0, False => 0b1 } }), bytes_eq(p3, q3)), eq_ExplainAble(p4, q4)) } };
+
+// The honest guarantee tag — C2 / VR-5.
+//
+// `Exact ⊐ Proven ⊐ Empirical ⊐ Declared`.
+//
+// All ops in `std.select` are `Exact` — the policy is a total predicate over *exact* metadata
+// (RFC-0005 §2.5). Nothing is probabilistic, learned, or estimated; `Exact` is the honest tag,
+// not an overclaim (spec §4, "Tag justification"). `Proven`/`Empirical`/`Declared` are present
+// for the complete lattice; they are not used by any op in this module.
+// Declared: renamed Exact -> Exact_kw (reserved-word collision, DN-140)
+// Declared: renamed Proven -> Proven_kw (reserved-word collision, DN-140)
+// Declared: renamed Empirical -> Empirical_kw (reserved-word collision, DN-140)
+// Declared: renamed Declared -> Declared_kw (reserved-word collision, DN-140)
+type GuaranteeTag = Exact_kw | Proven_kw | Empirical_kw | Declared_kw;
+
+impl Show[GuaranteeTag] for GuaranteeTag {
+  fn render(x: GuaranteeTag) => Bytes =
+    match x { Exact_kw => "Exact_kw", Proven_kw => "Proven_kw", Empirical_kw => "Empirical_kw", Declared_kw => "Declared_kw" };
+};
+
+fn eq_GuaranteeTag(a: GuaranteeTag, b: GuaranteeTag) => Binary{1} =
+  match a { Exact_kw => match b { Exact_kw => 0b1, _ => 0b0 }, Proven_kw => match b { Proven_kw => 0b1, _ => 0b0 }, Empirical_kw => match b { Empirical_kw => 0b1, _ => 0b0 }, Declared_kw => match b { Declared_kw => 0b1, _ => 0b0 } };
+
+// Whether an op emits a valid, inspectable `Explanation` (the C3 / SC-3 crux).
+type ExplainAble = Yes | NotApplicable;
+
+impl Show[ExplainAble] for ExplainAble {
+  fn render(x: ExplainAble) => Bytes =
+    match x { Yes => "Yes", NotApplicable => "NotApplicable" };
+};
+
+fn eq_ExplainAble(a: ExplainAble, b: ExplainAble) => Binary{1} =
+  match a { Yes => match b { Yes => 0b1, _ => 0b0 }, NotApplicable => match b { NotApplicable => 0b1, _ => 0b0 } };
